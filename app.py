@@ -13,11 +13,13 @@ import face_recognition
 import sqlite3
 import json
 import numpy as np
+from datetime import datetime  # <-- ADDED: For logging timestamps
 import vision_utils as vutils # Helper module for liveness logic
 
 # ==============================================================================
-# SECTION 2: DATABASE MODULE
+# SECTION 2: DATABASE & LOGGING MODULES
 # ==============================================================================
+
 def load_known_faces():
     """
     Function name  : load_known_faces
@@ -44,6 +46,20 @@ def load_known_faces():
     
     # Outcome: Returns two lists: one of embeddings and one of names.
     return known_face_embeddings, known_face_names
+
+def log_attendance(name):
+    """
+    Function name  : log_attendance
+    Description    : Appends a new entry to the attendance log file.
+    Author         : Chaitanya
+    """
+    # Task: Get the current timestamp.
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Task: Open the log file in append mode and write the entry.
+    with open('attendance.csv', 'a', newline='') as f:
+        log_entry = f"{timestamp},{name}\n"
+        f.write(log_entry)
 
 # ==============================================================================
 # SECTION 3: SYSTEM INITIALIZATION
@@ -98,6 +114,9 @@ while cap.isOpened():
                     best_match_index = np.argmin(face_distances)
                     if matches[best_match_index]:
                         name = known_face_names[best_match_index]
+                        
+                        # <<< --- LOGGING INTEGRATED HERE --- >>>
+                        log_attendance(name)
                         
                         # Task: Reset liveness after a successful recognition.
                         liveness_verified = False 
