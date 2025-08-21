@@ -5,6 +5,9 @@ Description    : The central backend engine for the Smart Attendance System.
 Author         : Chaitanya
 """
 
+# ==============================================================================
+# SECTION 1: IMPORTS
+# ==============================================================================
 import sqlite3
 import json
 import math
@@ -12,7 +15,11 @@ import cv2
 import face_recognition
 import mediapipe as mp
 import numpy as np
+import time
 
+# ==============================================================================
+# SECTION 2: THE MAIN BACKEND CLASS
+# ==============================================================================
 class AttendanceSystem:
     """
     Manages all backend logic for the attendance system.
@@ -24,20 +31,24 @@ class AttendanceSystem:
         self.db_path = db_path
         self._setup_database()
 
-        # Initialize MediaPipe Face Mesh for liveness detection
+        # --- Liveness Detection Setup ---
         self.mp_face_mesh = mp.solutions.face_mesh
         self.face_mesh = self.mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True)
-
-        # Liveness detection constants
         self.LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
         self.RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
         self.EAR_THRESHOLD = 0.25
         self.BLINK_FRAMES_MIN = 2
         self.BLINK_FRAMES_MAX = 5
 
-    # ==============================================================================
-    # SECTION 1: DATABASE MANAGEMENT
-    # ==============================================================================
+        # --- State Management for the Workflow ---
+        self.workflow_state = "WAITING_FOR_FACE"
+        self.blink_counter = 0
+        self.last_state_change_time = time.time()
+        self.verified_name = None
+
+    # --------------------------------------------------------------------------
+    # Subsection 2.1: Database Management (Author: Chaitanya)
+    # --------------------------------------------------------------------------
     def _setup_database(self):
         """
         Creates the database and the 'users' table with the new schema.
@@ -64,7 +75,7 @@ class AttendanceSystem:
         cursor = conn.cursor()
         
         embedding_json = json.dumps(embedding)
-        iris_code_json = json.dumps(iris_code) # Also store iris code as JSON
+        iris_code_json = json.dumps(iris_code)
         
         cursor.execute("INSERT INTO users (name, embedding, iris_code) VALUES (?, ?, ?)",
                        (name, embedding_json, iris_code_json))
@@ -94,15 +105,71 @@ class AttendanceSystem:
         print("Backend: Loaded known user profiles from the database.")
         return known_names, known_embeddings, known_iris_codes
 
-    # ==============================================================================
-    # SECTION 2: LIVENESS & RECOGNITION LOGIC
-    # ==============================================================================
-    
-    def check_liveness(self, frame, blink_counter):
+    # --------------------------------------------------------------------------
+    # Subsection 2.2: Main Workflow Orchestrator (Author: Chaitanya)
+    # --------------------------------------------------------------------------
+    def run_attendance_check(self, frame):
         """
-        Function name  : check_liveness
-        Description    : Checks for a blink in the given frame to verify liveness
-                         using the Eye Aspect Ratio (EAR) algorithm.
+        This is the main "brain" function the GUI will call in a loop.
+        """
+        status_message = "Initializing..."
+        status_color = (200, 200, 0)
+
+        # --- State 1: Waiting for a face to appear ---
+        if self.workflow_state == "WAITING_FOR_FACE":
+            status_message = "Please Look at the Camera"
+            face_locations = face_recognition.face_locations(frame, model="hog")
+            if len(face_locations) > 0:
+                self.workflow_state = "CHECKING_LIVENESS"
+                self.last_state_change_time = time.time()
+
+        # --- State 2: A face is present, check for a blink ---
+        elif self.workflow_state == "CHECKING_LIVENESS":
+            status_message = "Please Blink to Verify"
+            status_color = (0, 0, 255)
+            
+            is_live, self.blink_counter = self._check_liveness_internal(frame, self.blink_counter)
+            if is_live:
+                self.workflow_state = "PERFORMING_IRIS_SCAN"
+                self.last_state_change_time = time.time()
+
+        # --- State 3: Liveness confirmed, perform iris scan ---
+        elif self.workflow_state == "PERFORMING_IRIS_SCAN":
+            status_message = "Liveness Verified! Move Closer for Iris Scan"
+            status_color = (0, 255, 0)
+            
+            matched_name = self._recognize_iris_placeholder()
+            if matched_name:
+                self.verified_name = matched_name
+                self.workflow_state = "VERIFIED"
+                self.last_state_change_time = time.time()
+
+        # --- State 4: User verified, show success message then reset ---
+        elif self.workflow_state == "VERIFIED":
+            status_message = f"Attendance Marked for {self.verified_name}"
+            status_color = (0, 255, 0)
+            if time.time() - self.last_state_change_time > 3:
+                self.workflow_state = "WAITING_FOR_FACE"
+                self.verified_name = None
+
+        return status_message, status_color
+
+    # --------------------------------------------------------------------------
+    # Subsection 2.3: Core AI Logic
+    # --------------------------------------------------------------------------
+    def _recognize_iris_placeholder(self):
+        """
+        !!! PLACEHOLDER for Iris Recognition Engine !!!
+        Author         : Himanshu (to be implemented)
+        """
+        if time.time() - self.last_state_change_time > 2:
+            return "Chaitanya (Simulated)" 
+        return None
+
+    def _check_liveness_internal(self, frame, blink_counter):
+        """
+        Function name  : _check_liveness_internal
+        Description    : Internal helper method for blink detection using EAR.
         Author         : Himanshu
         """
         is_live = False
@@ -113,7 +180,6 @@ class AttendanceSystem:
             for face_landmarks in results.multi_face_landmarks:
                 h, w, _ = frame.shape
                 landmarks = [(lm.x * w, lm.y * h) for lm in face_landmarks.landmark]
-
                 left_ear = self._calculate_ear(landmarks, self.LEFT_EYE_INDICES)
                 right_ear = self._calculate_ear(landmarks, self.RIGHT_EYE_INDICES)
                 ear = (left_ear + right_ear) / 2.0
@@ -126,31 +192,8 @@ class AttendanceSystem:
                     blink_counter = 0
         else:
             blink_counter = 0
-
         return is_live, blink_counter
 
-    def recognize_face(self, frame, known_embeddings, known_names):
-        """
-        Performs face recognition on a given frame.
-        """
-        try:
-            live_face_locations = face_recognition.face_locations(frame)
-            live_face_embeddings = face_recognition.face_encodings(frame, live_face_locations)
-
-            for face_embedding in live_face_embeddings:
-                matches = face_recognition.compare_faces(known_embeddings, face_embedding, tolerance=0.6)
-                face_distances = face_recognition.face_distance(known_embeddings, face_embedding)
-                
-                if len(face_distances) > 0:
-                    best_match_index = np.argmin(face_distances)
-                    if matches[best_match_index]:
-                        return known_names[best_match_index] # Return the name of the matched person
-        except Exception as e:
-            print(f"Backend Error: An error occurred during face recognition: {e}")
-        
-        return None # Return None if no match is found
-
-    # --- Helper methods for liveness ---
     def _calculate_ear(self, landmarks, eye_indices):
         v1 = self._euclidean_distance(landmarks[eye_indices[1]], landmarks[eye_indices[5]])
         v2 = self._euclidean_distance(landmarks[eye_indices[2]], landmarks[eye_indices[4]])
