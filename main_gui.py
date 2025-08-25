@@ -1,284 +1,283 @@
+"""
+File name : main_gui.py
+Description : The main graphical user interface for the Smart Attendance System.
+This is the single entry point for the entire application.
+Author : Ragini (UI Design)
+Contributor : Chaitanya (Backend Integration)
+"""
+
+
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import messagebox
 from PIL import Image, ImageTk
 import cv2
-import sqlite3
-import io
 import time
+import backend  # Import backend logic
+import tkinter.font as tkFont
 
-# ======== SETTINGS & COLOR PALETTE ========
-PRIMARY = "#226B6F"     # deep teal
-DARKER = "#16383b"      # very dark teal/navy
-ACCENT = "#18bc9c"      # turquoise
-BG = "#f3f6f7"          # near-white cool gray
-SIDEBAR_BG = "#184B4C"  # sidebar slightly darker
-WHITE = "#FFFFFF"
+# Load Haar Cascade for eye detection
+eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_eye.xml")
 
-FONT_MAIN = ("Segoe UI", 13)
-FONT_HEADER = ("Segoe UI", 22, "bold")
-FONT_CARD = ("Segoe UI", 16, "bold")
+# ----------------- Button Styling -----------------
+def style_buttons(widget):
+    """Apply consistent style to all Tkinter buttons inside a widget."""
+    for child in widget.winfo_children():
+        if isinstance(child, tk.Button):
+            child.configure(
+                bg="#2a4365", fg="white",
+                activebackground="#1a2a43", activeforeground="white",
+                font=("Segoe UI", 13, "bold"),
+                bd=0, relief="flat",
+                padx=24, pady=10,
+                cursor="hand2"
+            )
+            # Hover effect
+            child.bind("<Enter>", lambda e, b=child: b.config(bg="#1a2a43"))
+            child.bind("<Leave>", lambda e, b=child: b.config(bg="#2a4365"))
+        elif isinstance(child, tk.Frame):
+            style_buttons(child)
 
-DB_NAME = "user_enrollment.db"
-TABLE_NAME = "users"
-CIRCLE_DIAMETER = 300
-
-FEEDBACK_STATES = [
-    ("Please Blink", (255, 215, 0)), # Gold
-    ("Verified!", (0, 255, 0)), # Green
-    ("Unknown User", (255, 0, 0)), # Red
-]
-FEEDBACK_KEYS = {"b": 0, "v": 1, "u": 2}
-
-# ========== DATABASE ==========
-def setup_database():
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            image BLOB NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def save_to_database(username, image_bytes):
-    conn = sqlite3.connect(DB_NAME)
-    c = conn.cursor()
-    c.execute(f"INSERT INTO {TABLE_NAME} (name, image) VALUES (?, ?)", (username, image_bytes))
-    conn.commit()
-    conn.close()
-    print(f"Saved image for user: {username}")
-
-# ========== ENROLLMENT WINDOW ==========
+# ====================================================================
+# ENROLLMENT WINDOW
+# ====================================================================
 class EnrollmentApp(tk.Toplevel):
-    def __init__(self, master):
+    def __init__(self, master, backend_system):
         super().__init__(master)
-        self.title("Smart Attendance System - Enrollment")
-        self.configure(bg=BG)
+        self.backend = backend_system
+        self.title("Smart Attendance - Enroll New User")
+        self.configure(bg="#f0f4f8")
+        self.state('zoomed')  # Fullscreen mode
 
-        tk.Label(self, text="🧑‍💼 Enter Name:", font=FONT_MAIN, bg=BG).pack(pady=10, padx=10)
-        self.name_entry = tk.Entry(self, font=FONT_MAIN)
-        self.name_entry.pack(pady=8, padx=16, ipadx=7, ipady=4)
+        # Title
+        tk.Label(self, text="Enroll New User", font=("Segoe UI", 20, "bold"),
+                 bg="#f0f4f8", fg="#2a4365").pack(pady=20)
 
-        self.video_frame = tk.Label(self, bg="#d0dedc")
-        self.video_frame.pack(padx=24, pady=12)
+        # Video display frame
+        self.video_frame = tk.Label(self, bg="#d7e1f1", bd=2, relief='sunken')
+        self.video_frame.pack(padx=40, pady=20)
 
-        btn_frame = tk.Frame(self, bg=BG)
-        btn_frame.pack(pady=12)
-        self.btn_save = tk.Button(
-            btn_frame, text="💾 Save User", command=self.save_user,
-            bg=PRIMARY, fg='white', font=FONT_CARD, width=14, height=1,
-            relief="raised", bd=2, cursor="hand2", activebackground=ACCENT
-        )
-        self.btn_save.grid(row=0, column=0, padx=10)
-        self.btn_close = tk.Button(
-            btn_frame, text="❌ Close", command=self.close,
-            bg=DARKER, fg='white', font=FONT_CARD, width=14, height=1,
-            relief="raised", bd=2, cursor="hand2", activebackground="#455A64"
-        )
-        self.btn_close.grid(row=0, column=1, padx=10)
+        # Name input
+        entry_frame = tk.Frame(self, bg="#f0f4f8")
+        entry_frame.pack(pady=15)
+        tk.Label(entry_frame, text="Full Name:", font=("Segoe UI", 14),
+                 bg="#f0f4f8", fg="#2a4365").grid(row=0, column=0, padx=10, pady=5)
+        self.name_entry = tk.Entry(entry_frame, font=("Segoe UI", 14), width=30)
+        self.name_entry.grid(row=0, column=1, padx=10, pady=5)
 
+        # Buttons
+        btn_frame = tk.Frame(self, bg="#f0f4f8")
+        btn_frame.pack(pady=15)
+        self.btn_save = tk.Button(btn_frame, text="Capture & Enroll", command=self.start_enrollment_process)
+        self.btn_save.grid(row=0, column=0, padx=15)
+        self.btn_close = tk.Button(btn_frame, text="Close", command=self.close_window)
+        self.btn_close.grid(row=0, column=1, padx=15)
+
+        style_buttons(self)
+
+        # Camera Setup
         self.cap = cv2.VideoCapture(0)
         self.running = True
+        self.captured_frame = None
+        self.countdown = 3  # Countdown in seconds
+        self.countdown_running = False
         self.update_video()
 
+    def draw_eye_guides(self, frame):
+        """Detect both eyes and draw separate circles on each."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
+        for (ex, ey, ew, eh) in eyes[:2]:  # Draw for up to 2 eyes
+            center = (ex + ew // 2, ey + eh // 2)
+            radius = max(ew, eh) // 3
+            cv2.circle(frame, center, radius, (0, 255, 0), 2)  # Green circle
+        return frame
+
     def update_video(self):
-        if not self.running: return
+        if not self.running:
+            return
         ret, frame = self.cap.read()
         if ret:
+            # Add eye guides
+            frame = self.draw_eye_guides(frame)
+
+            # Show countdown text if active
+            if self.countdown_running:
+                text = f"Capturing in {self.countdown}..."
+                cv2.putText(frame, text, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                            1.2, (0, 0, 255), 3, cv2.LINE_AA)
+
+            # Store frame for later capture
+            self.captured_frame = frame.copy()
+
+            # Convert to Tkinter display
             cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            im_pil = Image.fromarray(cv2image)
-            imgtk = ImageTk.PhotoImage(image=im_pil.resize((450, 340)))
+            img = Image.fromarray(cv2image).resize((640, 480))
+            imgtk = ImageTk.PhotoImage(image=img)
             self.video_frame.imgtk = imgtk
             self.video_frame.configure(image=imgtk)
-            self.frame = frame
-        self.after(15, self.update_video)
 
-    def save_user(self):
+        self.after(30, self.update_video)
+
+    def start_enrollment_process(self):
+        """Start countdown before capturing image."""
+        if self.countdown_running:
+            return
         name = self.name_entry.get().strip()
         if not name:
             messagebox.showerror("Error", "Please enter a name!")
             return
-        # Optional: Save face embedding here.
-        messagebox.showinfo("Success", f"User {name} enrolled successfully!")
+        self.countdown_running = True
+        self.countdown = 3
+        self._do_countdown()
 
-    def close(self):
+    def _do_countdown(self):
+        if self.countdown > 0:
+            self.countdown -= 1
+            self.after(1000, self._do_countdown)
+        else:
+            self.countdown_running = False
+            success, message = self.backend.add_user(self.name_entry.get().strip(), self.captured_frame)
+            if success:
+                messagebox.showinfo("Success", message)
+                self.close_window()
+            else:
+                messagebox.showerror("Error", message)
+
+    def close_window(self):
+        """Stop camera and close window."""
         self.running = False
         if self.cap.isOpened():
             self.cap.release()
         self.destroy()
 
-# ========== MARK ATTENDANCE WINDOW ==========
+# ====================================================================
+# MARK ATTENDANCE WINDOW
+# ====================================================================
 class MarkAttendanceApp(tk.Toplevel):
-    def __init__(self, master):
+    def __init__(self, master, backend_system):
         super().__init__(master)
+        self.backend = backend_system
         self.title("Smart Attendance - Mark Attendance")
-        self.configure(bg=BG)
-        self.geometry("720x680")
-        self.resizable(False, False)
+        self.configure(bg="#f0f4f8")
+        self.state('zoomed')
 
-        style = ttk.Style(self)
-        style.theme_use('clam')
-        style.configure("TLabel", font=FONT_MAIN, background=BG, foreground=DARKER)
-        style.configure("Header.TLabel", font=FONT_HEADER, foreground=PRIMARY)
-        style.configure("TButton", font=FONT_CARD, padding=(10, 10))
+        tk.Label(self, text="Mark Attendance", font=("Segoe UI", 20, "bold"),
+                 bg="#f0f4f8", fg="#2a4365").pack(pady=20)
 
-        ttk.Label(self, text="✅ Smart Attendance System", style="Header.TLabel").pack(pady=18)
-        ttk.Label(self, text="👋 Please look into the camera and wait for recognition.").pack(pady=8)
+        self.video_frame = tk.Label(self, bg="#d7e1f1", bd=2, relief='sunken')
+        self.video_frame.pack(padx=40, pady=20)
 
-        entry_frame = ttk.Frame(self)
-        entry_frame.pack(pady=14)
-        ttk.Label(entry_frame, text="📝 Full Name:", font=FONT_CARD).grid(row=0, column=0, padx=8)
-        self.name_entry = ttk.Entry(entry_frame, font=FONT_MAIN, width=28)
-        self.name_entry.grid(row=0, column=1, padx=8)
+        self.status_label = tk.Label(self, text="Status: Initializing...", font=("Segoe UI", 15, "italic"),
+                                     bg="#f0f4f8", fg="#495f88")
+        self.status_label.pack(pady=15)
 
-        self.video_border = tk.Frame(self, bg="#dbeeee", bd=2, relief="ridge")
-        self.video_border.pack(pady=22)
-        self.video_frame = tk.Label(self.video_border, bg="#dbeeee", width=500, height=360)
-        self.video_frame.pack()
+        self.btn_close = tk.Button(self, text="Close", command=self.close_window)
+        self.btn_close.pack(pady=10)
+        style_buttons(self)
 
-        self.feedback_label = ttk.Label(self, text="Status: Waiting for recognition...", font=("Segoe UI", 13, "italic"))
-        self.feedback_label.pack(pady=8)
-
-        btn_frame = ttk.Frame(self)
-        btn_frame.pack(pady=26)
-        self.btn_save = ttk.Button(btn_frame, text="💾 Save Photo", command=self.save_photo)
-        self.btn_save.grid(row=0, column=0, padx=18)
-        self.btn_quit = ttk.Button(btn_frame, text="❌ Close", command=self.quit_app)
-        self.btn_quit.grid(row=0, column=1, padx=18)
-
+        # Camera setup
         self.cap = cv2.VideoCapture(0)
-        if not self.cap.isOpened():
-            messagebox.showerror("Error", "⚠️ Could not access the camera.")
-            self.destroy()
-            return
-
-        self.saved_frame = None
-        self.feedback_state = 0
+        self.running = True
         self.update_video()
 
+    def draw_eye_guides(self, frame):
+        """Draw circles around both eyes for guidance."""
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        eyes = eye_cascade.detectMultiScale(gray, 1.3, 5)
+        for (ex, ey, ew, eh) in eyes[:2]:
+            center = (ex + ew // 2, ey + eh // 2)
+            radius = max(ew, eh) // 3
+            cv2.circle(frame, center, radius, (0, 255, 0), 2)
+        return frame
+
     def update_video(self):
+        if not self.running:
+            return
         ret, frame = self.cap.read()
-        if not ret:
-            self.video_frame.config(text="Camera not found")
-            self.after(20, self.update_video)
-            return
+        if ret:
+            status_msg, status_color_bgr = self.backend.run_attendance_check(frame)
+            # Add eye guides
+            frame = self.draw_eye_guides(frame)
+            # Status on frame
+            cv2.putText(frame, status_msg, (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0, status_color_bgr, 3, cv2.LINE_AA)
+            self.status_label.config(text=f"Status: {status_msg}", fg="#2a4365")
 
-        h, w = frame.shape[:2]
-        cx, cy = w // 2, h // 2
-        r = CIRCLE_DIAMETER // 2
+            # Display in Tkinter
+            cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(cv2image).resize((640, 480))
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_frame.imgtk = imgtk
+            self.video_frame.configure(image=imgtk)
 
-        # Draw circular overlay
-        frame_overlay = frame.copy()
-        cv2.circle(frame_overlay, (cx, cy), r, (0, 120, 255), thickness=3)
-        msg, color_bgr = FEEDBACK_STATES[self.feedback_state]
-        cv2.putText(frame_overlay, msg, (60, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.3, color_bgr, 3, cv2.LINE_AA)
-        self.feedback_label.config(text=f"Status: {msg}")
+        self.after(30, self.update_video)
 
-        cv2image = cv2.cvtColor(frame_overlay, cv2.COLOR_BGR2RGB)
-        imgtk = ImageTk.PhotoImage(image=Image.fromarray(cv2image).resize((500, 360)))
-        self.video_frame.imgtk = imgtk
-        self.video_frame.config(image=imgtk)
-        self.saved_frame = frame.copy()
-        self.after(20, self.update_video)
-
-    def save_photo(self):
-        username = self.name_entry.get().strip()
-        if not username:
-            messagebox.showwarning("Input Required", "⚠️ Please enter a name before saving.")
-            return
-        im_pil = Image.fromarray(cv2.cvtColor(self.saved_frame, cv2.COLOR_BGR2RGB))
-        with io.BytesIO() as output:
-            im_pil.save(output, format="JPEG")
-            img_bytes = output.getvalue()
-        save_to_database(username, img_bytes)
-        messagebox.showinfo("Saved", f"✅ Photo for {username} saved successfully!")
-
-    def quit_app(self):
+    def close_window(self):
+        self.running = False
         if self.cap.isOpened():
             self.cap.release()
         self.destroy()
 
-# ========== MODERN MAIN HOME PAGE ==========
+# ====================================================================
+# HOME PAGE
+# ====================================================================
 class HomePage(tk.Tk):
-    def __init__(self):
+    def __init__(self, backend_system):
         super().__init__()
+        self.backend_system = backend_system
         self.title("Smart Attendance System")
-        self.geometry("860x480")
-        self.configure(bg=BG)
-        self.resizable(False, False)
+        self.configure(bg="#1f2937")
+        self.state('zoomed')
 
-        # Sidebar
-        sidebar = tk.Frame(self, bg=SIDEBAR_BG, width=95)
-        sidebar.pack(side="left", fill="y")
+        # Fonts
+        self.font_bold = tkFont.Font(family="Helvetica", size=28, weight="bold")
+        self.font_regular = tkFont.Font(family="Helvetica", size=14)
+        self.font_button = tkFont.Font(family="Helvetica", size=16, weight="bold")
 
-        for i, (icon, text, cmd) in enumerate([
-            ("🏠", "Home", None),
-            ("🧑‍💼", "Enroll", self.open_enrollment),
-            ("✅", "Mark", self.open_mark_attendance),
-            ("📊", "Report", self.open_reports),
-            ("⚙", "Settings", self.open_settings)
-        ]):
-            btn = tk.Button(sidebar, text=f"{icon}\n{text}", font=FONT_MAIN, bg=SIDEBAR_BG, fg="white", bd=0,
-                            relief="flat", activebackground=PRIMARY, activeforeground="white",
-                            command=cmd if cmd else lambda: None, cursor="hand2")
-            btn.pack(pady=10, fill="x", ipadx=2, ipady=5)
+        # Title
+        tk.Label(self, text="Smart Attendance System", font=self.font_bold,
+                 bg="#1f2937", fg="#0ee9d2").pack(pady=50)
+        tk.Label(self, text="Welcome! Please choose an option below.",
+                 font=self.font_regular, bg="#1f2937", fg="#5eead4").pack(pady=10)
 
-        # Header
-        header = tk.Frame(self, bg=BG)
-        header.pack(side="top", fill="x", pady=(18, 0), padx=(125, 35))
-        tk.Label(header, text="Smart Attendance System", font=FONT_HEADER, fg=PRIMARY, bg=BG).pack(anchor='w')
-        self.clock_lbl = tk.Label(header, text="", font=("Segoe UI", 11), bg=BG, fg=ACCENT)
-        self.clock_lbl.pack(anchor='e')
-        self.update_clock()
+        # Card layout
+        card_frame = tk.Frame(self, bg="#bcd2f0")
+        card_frame.pack(pady=60, expand=True, fill="both")
+        card_style = {"bg": "#111827", "relief": "raised", "bd": 0,
+                      "highlightthickness": 2, "highlightbackground": "#0ee9d2",
+                      "cursor": "hand2"}
 
-        # Main Cards Section
-        main = tk.Frame(self, bg=BG)
-        main.pack(padx=(140,32), pady=(46,20), fill="both", expand=True)
+        # Enrollment card
+        enroll_card = tk.Frame(card_frame, **card_style)
+        enroll_card.pack(side="left", padx=80, pady=20, expand=True, fill="both")
+        tk.Label(enroll_card, text="🧑💼", font=("Helvetica", 70), bg="#111827", fg="#0ee9d2").pack(pady=(50, 12))
+        tk.Label(enroll_card, text="Enroll User", font=self.font_bold, bg="#111827", fg="#0ee9d2").pack(pady=8)
+        tk.Button(enroll_card, text="Launch Enrollment", font=self.font_button, bg="#10b981", fg="white",
+                  activebackground="#0f766e", activeforeground="white", bd=0, padx=30, pady=16,
+                  command=self.open_enrollment).pack(pady=50)
 
-        for i, (emoji, title, desc, cmd) in enumerate([
-            ("🧑‍💼", "Enroll User", "Add a new face and name to the system.", self.open_enrollment),
-            ("✅", "Mark Attendance", "Recognize and mark present.", self.open_mark_attendance),
-        ]):
-            card = tk.Frame(main, bg=WHITE, relief="raised", bd=3)
-            card.grid(row=0, column=i, padx=26, pady=8, ipadx=18, ipady=5, sticky="nsew")
-            tk.Label(card, text=emoji, font=("Segoe UI", 50), bg=WHITE).pack(pady=(10,0))
-            tk.Label(card, text=title, font=FONT_CARD, fg=PRIMARY, bg=WHITE).pack(pady=(4,4))
-            tk.Label(card, text=desc, font=FONT_MAIN, fg="#444", bg=WHITE).pack(pady=(0,11))
-            tk.Button(card, text="Launch", font=FONT_MAIN, bg=PRIMARY, fg="white", width=13,
-                      command=cmd, cursor="hand2", relief="raised", activebackground=ACCENT).pack(pady=(0,13))
+        # Attendance card
+        attendance_card = tk.Frame(card_frame, **card_style)
+        attendance_card.pack(side="right", padx=80, pady=20, expand=True, fill="both")
+        tk.Label(attendance_card, text="✅", font=("Helvetica", 70), bg="#111827", fg="#0ee9d2").pack(pady=(50, 12))
+        tk.Label(attendance_card, text="Mark Attendance", font=self.font_bold, bg="#111827", fg="#0ee9d2").pack(pady=8)
+        tk.Button(attendance_card, text="Launch Attendance", font=self.font_button, bg="#10b981", fg="white",
+                  activebackground="#0f766e", activeforeground="white", bd=0, padx=30, pady=16,
+                  command=self.open_mark_attendance).pack(pady=50)
 
-        # Footer
-        footer = tk.Frame(self, bg=SIDEBAR_BG, height=32)
-        footer.pack(fill="x", side="bottom")
-        lbl_footer = tk.Label(
-            footer, text="© 2025 Smart Attendance System. All Rights Reserved.",
-            font=("Segoe UI", 9, "italic"), fg="white", bg=SIDEBAR_BG
-        )
-        lbl_footer.pack(pady=6)
-
-    def update_clock(self):
-        now = time.strftime("%A %I:%M %p")
-        self.clock_lbl.config(text=now)
-        self.after(1000, self.update_clock)
+        style_buttons(self)
 
     def open_enrollment(self):
-        EnrollmentApp(self)
+        EnrollmentApp(self, self.backend_system)
 
     def open_mark_attendance(self):
-        MarkAttendanceApp(self)
+        MarkAttendanceApp(self, self.backend_system)
 
-    def open_reports(self):
-        messagebox.showinfo("Reports", "Report functionality coming soon.")
-
-    def open_settings(self):
-        messagebox.showinfo("Settings", "Settings functionality coming soon.")
-
-# ======= MAIN ENTRY POINT ==========
+# ====================================================================
+# MAIN ENTRY
+# ====================================================================
 if __name__ == "__main__":
-    setup_database()
-    app = HomePage()
+    system_backend = backend.AttendanceSystem()
+    app = HomePage(backend_system=system_backend)
     app.mainloop()
 
