@@ -1,57 +1,37 @@
 """
 File name      : backend.py
 Description    : The central backend engine for the Smart Attendance System.
-                 Manages the database, liveness detection, and all recognition logic.
-Author         : Chaitanya & Himanshu
+Author         : Chaitanya
+Contributor    : Himanshu (Core Engine)
 """
-
-# ==============================================================================
-# SECTION 1: IMPORTS
-# ==============================================================================
 import sqlite3
 import json
-import math
 import cv2
 import face_recognition
-import mediapipe as mp
 import numpy as np
 import time
-import os
-from iris_engine import create_iris_code, compare_iris_codes, IrisTemplate, is_match
+import iris_engine # Import Friend 1's new engine
+from scipy.spatial import distance as dist
 
 
-# ==============================================================================
-# SECTION 2: THE MAIN BACKEND CLASS
-# ==============================================================================
 class AttendanceSystem:
-    """
-    Manages all backend logic for the attendance system.
-    """
     def __init__(self, db_path='users.db'):
-        """
-        Initializes the system, sets up the database, and loads MediaPipe models.
-        """
         self.db_path = db_path
         self._setup_database()
-
-        # --- Liveness Detection Setup ---
-        self.mp_face_mesh = mp.solutions.face_mesh
-        self.face_mesh = self.mp_face_mesh.FaceMesh(max_num_faces=1, refine_landmarks=True)
-        self.LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
-        self.RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
-        self.EAR_THRESHOLD = 0.25
-        self.BLINK_FRAMES_MIN = 2
-        self.BLINK_FRAMES_MAX = 5
-
+        # --- NEW: Load known users into memory on startup ---
+        self.known_names, self.known_embeddings, self.known_iris_codes = self.load_known_users()
+        
         # --- State Management for the Workflow ---
         self.workflow_state = "WAITING_FOR_FACE"
         self.blink_counter = 0
         self.last_state_change_time = time.time()
         self.verified_name = None
 
-    # --------------------------------------------------------------------------
-    # Subsection 2.1: Database Management
-    # --------------------------------------------------------------------------
+        # --- Blink / EAR thresholds ---
+        self.EAR_THRESHOLD = 0.21
+        self.BLINK_FRAMES_MIN = 2
+        self.BLINK_FRAMES_MAX = 6
+
     def _setup_database(self):
         """
         Creates the database and the 'users' table with the new schema.
@@ -70,60 +50,92 @@ class AttendanceSystem:
         conn.close()
         print("Backend: Database is set up and ready.")
 
-    def add_user(self, name, embedding, iris_template: IrisTemplate):
+    def add_user(self, name, frame):
         """
-        Adds a new user profile (name, face embedding, and iris code) to the database.
+        MODIFIED: Now takes a full frame to generate both embedding and iris code.
         """
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        embedding_json = json.dumps(embedding)
+        try:
+            # --- Face Embedding Logic ---
+            face_locations = face_recognition.face_locations(frame)
+            if not face_locations:
+                return False, "No face detected."
+            embedding = face_recognition.face_encodings(frame, face_locations)[0].tolist()
 
-        iris_code_json = json.dumps({
-            "code": iris_template.code.astype(int).tolist(),
-            "mask": iris_template.mask.astype(int).tolist()
-        })
-        
-        cursor.execute("INSERT INTO users (name, embedding, iris_code) VALUES (?, ?, ?)",
-                       (name, embedding_json, iris_code_json))
-        conn.commit()
-        conn.close()
-        print(f"Backend: User '{name}' has been added to the database.")
+            # --- Iris Code Logic (from Friend 1) ---
+            iris_template = iris_engine.create_iris_code(frame)
+            # Convert boolean arrays to lists of 0s and 1s for JSON storage
+            iris_code_list = [int(b) for b in iris_template.code]
+            iris_mask_list = [int(b) for b in iris_template.mask]
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            embedding_json = json.dumps(embedding)
+            # Store both code and mask
+            iris_json = json.dumps({'code': iris_code_list, 'mask': iris_mask_list})
+            
+            cursor.execute("INSERT INTO users (name, embedding, iris_code) VALUES (?, ?, ?)",
+                           (name, embedding_json, iris_json))
+            conn.commit()
+            conn.close()
+            # Reload known users after adding a new one
+            self.known_names, self.known_embeddings, self.known_iris_codes = self.load_known_users()
+            return True, f"User '{name}' enrolled successfully."
+        except Exception as e:
+            return False, f"Enrollment failed: {e}"
 
     def load_known_users(self):
         """
         Loads all user profiles from the database into memory.
         """
-        known_embeddings = []
-        known_iris_codes = []
-        known_names = []
-
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT name, embedding, iris_code FROM users")
-        rows = cursor.fetchall()
-
-        for row in rows:
-            name = row[0]
-            embedding = np.array(json.loads(row[1]))
-            iris_dict = json.loads(row[2])
-
-            iris_template = IrisTemplate(
-                code=np.array(iris_dict["code"], dtype=bool),
-                mask=np.array(iris_dict["mask"], dtype=bool)
-            )
-
-            known_names.append(name)
-            known_embeddings.append(embedding)
-            known_iris_codes.append(iris_template)
-            
-        conn.close()
-        print("Backend: Loaded known user profiles from the database.")
+        known_names, known_embeddings, known_iris_codes = [], [], []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, embedding, iris_code FROM users")
+            rows = cursor.fetchall()
+            for row in rows:
+                known_names.append(row[0])
+                known_embeddings.append(np.array(json.loads(row[1])))
+                # Recreate the IrisTemplate object from stored data
+                iris_data = json.loads(row[2])
+                code = np.array(iris_data['code'], dtype=bool)
+                mask = np.array(iris_data['mask'], dtype=bool)
+                known_iris_codes.append(iris_engine.IrisTemplate(code=code, mask=mask))
+            conn.close()
+        except Exception as e:
+            print(f"Database Error: Could not load users. DB might be empty. Error: {e}")
         return known_names, known_embeddings, known_iris_codes
 
-    # --------------------------------------------------------------------------
-    # Subsection 2.2: Main Workflow Orchestrator
-    # --------------------------------------------------------------------------
+    # ======== NEW: Blink/Liveness helpers ========
+    def _compute_ear(self, eye):
+        A = dist.euclidean(eye[1], eye[5])
+        B = dist.euclidean(eye[2], eye[4])
+        C = dist.euclidean(eye[0], eye[3])
+        return (A + B) / (2.0 * C)
+
+    def _check_liveness_internal(self, frame, blink_counter):
+        face_landmarks_list = face_recognition.face_landmarks(frame)
+        if not face_landmarks_list:
+            return False, blink_counter
+
+        landmarks = face_landmarks_list[0]
+        if "left_eye" not in landmarks or "right_eye" not in landmarks:
+            return False, blink_counter
+
+        leftEAR = self._compute_ear(landmarks["left_eye"])
+        rightEAR = self._compute_ear(landmarks["right_eye"])
+        ear = (leftEAR + rightEAR) / 2.0
+
+        if ear < self.EAR_THRESHOLD:  # eyes closed
+            blink_counter += 1
+        else:  # eyes open
+            if self.BLINK_FRAMES_MIN <= blink_counter <= self.BLINK_FRAMES_MAX:
+                return True, 0  # blink detected
+            blink_counter = 0
+
+        return False, blink_counter
+
+    # ======== MAIN WORKFLOW ========
     def run_attendance_check(self, frame):
         """
         This is the main "brain" function the GUI will call in a loop.
@@ -137,30 +149,32 @@ class AttendanceSystem:
             face_locations = face_recognition.face_locations(frame, model="hog")
             if len(face_locations) > 0:
                 self.workflow_state = "CHECKING_LIVENESS"
+                self.blink_counter = 0
                 self.last_state_change_time = time.time()
 
-        # --- State 2: A face is present, check for a blink ---
+        # --- State 2: Ask user to blink ---
         elif self.workflow_state == "CHECKING_LIVENESS":
             status_message = "Please Blink to Verify"
             status_color = (0, 0, 255)
-            
-            is_live, self.blink_counter = self._check_liveness_internal(frame, self.blink_counter)
-            if is_live:
+
+            blinked, self.blink_counter = self._check_liveness_internal(frame, self.blink_counter)
+            if blinked:
                 self.workflow_state = "PERFORMING_IRIS_SCAN"
                 self.last_state_change_time = time.time()
+            elif time.time() - self.last_state_change_time > 10:
+                self.workflow_state = "WAITING_FOR_FACE"  # reset if timeout
 
-        # --- State 3: Liveness confirmed, perform iris scan ---
+        # --- State 3: Perform iris scan ---
         elif self.workflow_state == "PERFORMING_IRIS_SCAN":
-            status_message = "Liveness Verified! Move Closer for Iris Scan"
+            status_message = "Scanning Iris..."
             status_color = (0, 255, 0)
-            
             matched_name = self._recognize_iris(frame)
             if matched_name:
                 self.verified_name = matched_name
                 self.workflow_state = "VERIFIED"
                 self.last_state_change_time = time.time()
 
-        # --- State 4: User verified, show success message then reset ---
+        # --- State 4: User verified ---
         elif self.workflow_state == "VERIFIED":
             status_message = f"Attendance Marked for {self.verified_name}"
             status_color = (0, 255, 0)
@@ -170,72 +184,28 @@ class AttendanceSystem:
 
         return status_message, status_color
 
-    # --------------------------------------------------------------------------
-    # Subsection 2.3: Core AI Logic
-    # --------------------------------------------------------------------------
     def _recognize_iris(self, frame):
         """
-        Uses the Iris Recognition Engine to identify the user.
-        Author: Himanshu
+        Author: Himanshu (Engine), Chaitanya (Integration)
         """
-        temp_path = "current_eye.jpg"
-        cv2.imwrite(temp_path, frame)
-
         try:
-            iris_template = create_iris_code(temp_path)
+            live_template = iris_engine.create_iris_code(frame)
+            
+            if not self.known_iris_codes:
+                return None # No users enrolled
+
+            best_distance = 1.0
+            best_match_name = None
+
+            for i, known_template in enumerate(self.known_iris_codes):
+                distance, _ = iris_engine.compare_iris_codes(live_template, known_template)
+                if distance < best_distance:
+                    best_distance = distance
+                    best_match_name = self.known_names[i]
+            
+            if iris_engine.is_match(best_distance):
+                return best_match_name
         except Exception as e:
-            print(f"Backend: Iris template creation failed - {e}")
-            return None
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-        known_names, _, known_iris_codes = self.load_known_users()
-
-        for name, stored_template in zip(known_names, known_iris_codes):
-            try:
-                hd, shift = compare_iris_codes(iris_template, stored_template)
-                if is_match(hd, threshold=0.35):
-                    print(f"Backend: Iris matched with {name}, HD={hd:.4f}, shift={shift}")
-                    return name
-            except Exception as e:
-                print(f"Backend: Error comparing iris with {name} - {e}")
-
+            # This can happen if no eye is found in the frame
+            pass
         return None
-
-    def _check_liveness_internal(self, frame, blink_counter):
-        """
-        Internal helper method for blink detection using EAR.
-        """
-        is_live = False
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.face_mesh.process(rgb_frame)
-
-        if results.multi_face_landmarks:
-            for face_landmarks in results.multi_face_landmarks:
-                h, w, _ = frame.shape
-                landmarks = [(lm.x * w, lm.y * h) for lm in face_landmarks.landmark]
-                left_ear = self._calculate_ear(landmarks, self.LEFT_EYE_INDICES)
-                right_ear = self._calculate_ear(landmarks, self.RIGHT_EYE_INDICES)
-                ear = (left_ear + right_ear) / 2.0
-
-                if ear < self.EAR_THRESHOLD:
-                    blink_counter += 1
-                else:
-                    if self.BLINK_FRAMES_MIN <= blink_counter <= self.BLINK_FRAMES_MAX:
-                        is_live = True
-                    blink_counter = 0
-        else:
-            blink_counter = 0
-        return is_live, blink_counter
-
-    def _calculate_ear(self, landmarks, eye_indices):
-        v1 = self._euclidean_distance(landmarks[eye_indices[1]], landmarks[eye_indices[5]])
-        v2 = self._euclidean_distance(landmarks[eye_indices[2]], landmarks[eye_indices[4]])
-        h = self._euclidean_distance(landmarks[eye_indices[0]], landmarks[eye_indices[3]])
-        if h == 0: return 0.0
-        return (v1 + v2) / (2.0 * h)
-
-    @staticmethod
-    def _euclidean_distance(point1, point2):
-        return math.dist(point1, point2)
