@@ -126,12 +126,7 @@ Follow these instructions to get a copy of the project up and running on your lo
     source venv/bin/activate
     ```
 
-3.  **Install the required dependencies:**
-    ```sh
-    pip install -r requirements.txt
-    ```
-
-4.  **Run the application:**
+3.  **Run the application:**
     ```sh
     python main_gui.py
     ```
